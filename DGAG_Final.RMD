@@ -1,0 +1,615 @@
+---
+title: "MROI - Récapitulatif"
+author: "Chaimae Sriti"
+output:
+  html_document:
+    highlight: tango
+    number_sections: no
+    theme: united
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  word_document: default
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE ,warning=FALSE, error=FALSE, message=FALSE)
+```
+
+# Les données {.tabset}
+
+Dans les données ci-dessous, on a combiné les données concernant les dépenses en télémarketing en volume par habitant, ainsi que les données (covariables) provenant de StatCan.
+
+- Il est à noter qu'on ne conserve que les 152 RTAs issues du plus gros cluster K-means (K=5).
+- Pour faire l'ACP, on a supprimé les RTAs aberrantes (parmi les 152 RTAs), on a conservé ainsi 128 RTAs.
+- Pour calculer le score de propension, on prend, dans un premier lieu, les 30 RTAs où l'on dépense le plus (high), et les 30 RTAs où l'on dépense le moins (low).
+- On rajoute la colonne (variable réponse) TREATED = 1 si RTA %in% high et = 0 si RTA %in% low.
+
+```{r, echo=FALSE}
+library(MatchIt)
+library(dplyr)
+library(plotly)
+library(psych)
+library(FactoMineR)
+library(factoextra)
+library(DT)
+library(sf)
+library(gridExtra)
+library(leaflet)
+library(data.table)
+library(broom)
+library(magrittr)
+library(tidyverse)
+library(ggplot2)
+library(PSW)
+
+#Data
+
+RTA_SHP_QC <- readRDS("C:\\Users\\chaimae\\Desktop\\Essai\\rta_shp_qc.rds")
+STATCAN <- read.table("C:\\Users\\chaimae\\Desktop\\Essai\\GEOBD_RTA.csv",sep=";",header=T)
+data_var_statcan <- read.table("C:\\Users\\chaimae\\Documents\\data_var_statcan.csv",sep=",",header=T)
+data_var_statcan$X <- NULL
+pca_PHONE_coord <- read.table("C:\\Users\\chaimae\\Documents\\pca_PHONE_coord.csv",sep=",",header=T)
+pca_PHONE_coord$X <- NULL
+head(data_var_statcan[,c(1,5:8,12)])
+```
+
+
+# Classification KMeans
+
+
+```{r}
+K_means_vars <-c("MAILA__COST","P_marie","P_immigr","P_mater_fr")
+data_kmeans <- as.data.frame(scale(data_var_statcan[,K_means_vars]))
+data_kmeans$MAILA__COST_2 <- 2 * data_kmeans$MAILA__COST
+  
+K_means_vars <-c("MAILA__COST_2","P_marie","P_immigr","P_mater_fr")
+
+phone_kmean <- kmeans(
+  x       = data_kmeans[,K_means_vars],
+  centers = 5, 
+  nstart  = 20
+)
+
+phone_kmean$size  #264
+phone_kmean$withinss/phone_kmean$size 
+data_var_statcan$CLUSTER<- phone_kmean$cluster
+data_var_statcan_Kmeans <- data_var_statcan[data_var_statcan$CLUSTER==1,]
+data_var_statcan_Kmeans <- arrange(data_var_statcan_Kmeans,by=PHONE__COST)
+data_var_statcan_Kmeans$GROUP<- c(rep('LOW',50),rep('MIDDLE',51),rep('HIGH',50))
+data_var_statcan_Kmeans$treated <- c(rep(0,50),rep(2,51),rep(1,50))
+```
+
+## Différences de moyennes
+
+```{r, echo = F}
+#Différences - télémarketing
+data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),] %>%
+  group_by(treated) %>% 
+  summarise(n_rtas = n(),
+            mean_phone = mean(PHONE__COST),
+            std_error = sd(PHONE__COST) / sqrt(n_rtas))
+
+
+#Différences - soumissions
+data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),] %>%
+  group_by(treated) %>% 
+  summarise(n_rtas = n(),
+            mean_soum = mean(SOUM_MEANS),
+            std_error = sd(SOUM_MEANS) / sqrt(n_rtas))
+
+
+#Différences - Maila
+data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),] %>%
+  group_by(treated) %>% 
+  summarise(n_rtas = n(),
+            mean_maila= mean(MAILA__COST),
+            std_error = sd(MAILA__COST) / sqrt(n_rtas))
+```
+
+
+## Carthographie
+
+
+```{r, echo = F}
+data_var_statcan$MEAN <- data_var_statcan$PHONE__COST
+data_var_statcan$GROUPS <- ifelse(data_var_statcan$GEO_RTA %in% data_var_statcan_Kmeans$GEO_RTA[data_var_statcan_Kmeans$treated==1],"high",ifelse(data_var_statcan$GEO_RTA %in% data_var_statcan_Kmeans$GEO_RTA[data_var_statcan_Kmeans$treated==0],"low","middle"))
+
+DATA_PHONE_lf <- RTA_SHP_QC %>% 
+  left_join(data_var_statcan, by = 'GEO_RTA') %>% 
+  mutate(
+    popup = paste(GEO_RTA, 
+                  '<br /> #Pop: ', GEO_NBF_2016, 
+                  '<br /> #Phone/hab: ', round(MEAN, 2),
+                  '<br /> Clust: ', CLUSTER,
+                  '<br /> Group: ', GROUPS)
+  )
+
+# creation palette de couleurs
+MaPalette0 <- colorNumeric(c('blue', 'white', 'red'), range(1e3 * DATA_PHONE_lf$MEAN))
+MaPalette1 <- colorFactor(c('grey', 'black'), 0:1)
+MaPalette2 <- colorFactor(c('#088A08', '#F4FA58', '#FF8000', '#0000FF', '#FF0000'), 
+                          phone_kmean$cluster %>% factor %>% summary %>% sort(decreasing = T) %>% names())
+#MaPalette21 <- colorFactor(c('#088A08'), 1)
+#MaPalette22 <- colorFactor(c('#FFFF00'), 2)
+#MaPalette23 <- colorFactor(c('#FF8000'), 3)
+#MaPalette24 <- colorFactor(c('#61210B'), 4)
+#MaPalette25 <- colorFactor(c('#DF01D7'), 5)
+MaPalette3 <- colorFactor(c('black', 'white'), c('high', 'low'))
+
+# creation de la map
+leaflet(DATA_PHONE_lf) %>%  
+  addProviderTiles(providers$OpenStreetMap) %>% 
+  
+  addPolygons(
+    highlight   = highlightOptions(color = 'black'),
+    fillColor   = MaPalette0(1e3 * DATA_PHONE_lf$MEAN),  
+    fillOpacity = .6,
+    weight      = 1.5, 
+    color       = 'darkgrey',
+    popup       = ~ popup,
+    group       = 'Phone/mhab'
+  ) %>% 
+  addLegend('bottomright', pal = MaPalette0, values = 0:max(1e3 * data_var_statcan$MEAN), 
+            title = 'Phone/mhab', group = 'Phone/mhab') %>% 
+  
+  #addPolygons(weight = 1.5, fillOpacity = 0, color = MaPalette21(), group = 'Clust1') %>% 
+  #addPolygons(weight = 1.5, fillOpacity = 0, color = MaPalette22(), group = 'Clust2') %>% 
+  #addPolygons(weight = 1.5, fillOpacity = 0, color = MaPalette23(), group = 'Clust3') %>% 
+  #addPolygons(weight = 1.5, fillOpacity = 0, color = MaPalette24(), group = 'Clust4') %>% 
+  #addPolygons(weight = 1.5, fillOpacity = 0, color = MaPalette25(), group = 'Clust5') %>% 
+  addPolygons(
+    highlight   = highlightOptions(color = 'black'),
+    fillColor   = MaPalette2(DATA_PHONE_lf$CLUSTER),  
+    fillOpacity = .8,
+    weight      = 1.5, 
+    color       = 'darkgrey',
+    popup       = ~ popup,
+    group       = 'Clusts'
+  ) %>% 
+  addLegend('bottomleft', pal = MaPalette2, values = 1:2, title = 'Clusts', group = 'Clusts') %>% 
+  
+  addPolygons(
+    highlight   = highlightOptions(color = 'black'),
+    fillColor   = MaPalette3(DATA_PHONE_lf$GROUPS),  
+    fillOpacity = ifelse(DATA_PHONE_lf$GROUP %in% c('high', 'low'), .6, 0),  
+    weight      = 1.5, 
+    color       = 'darkgrey',
+    popup       = ~ popup,
+    group       = 'High/low'
+  ) %>% 
+  addLegend('bottomleft', pal = MaPalette3, values = c('high', 'low'), 
+            title = 'High/low', group = 'High/low')
+
+```
+
+
+# Score de propension {.tabset}
+
+```{r,include=FALSE,eval=F}
+## Selection stepwise
+m_ps <- glm(formula = treated ~ MAILA__COST+ REF__VOLUME + LEAD__VOLUME + 
+        P_mater_fr +  P_2564_uni_above , family = "binomial", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% 
+                                                                                           c(1, 0), ])
+
+summary(m_ps)
+
+boxplot(m_ps$fitted~data_var_statcan_Kmeans$treat[data_var_statcan_Kmeans$treated %in% 
+                                                    c(1,0)]);
+
+library(pROC)
+g <- roc(treated ~ predict(m_ps,type=c("response")), data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0), ])
+g
+prs_df_matching_2 <- data.frame(pr_score_2 = round(predict(m_ps, type = "response"),10),
+                                treated = m_ps$model$treated)
+
+prs_df_matching_2$matching_weight <- ifelse(prs_df_matching_2$treated == 1,1/prs_df_matching_2$pr_score_2,1/(1-prs_df_matching_2$pr_score_2))
+
+prs_df_matching_2$GEO_RTA <- data_var_statcan_Kmeans$GEO_RTA[data_var_statcan_Kmeans$treated %in% c(1,0)] 
+prs_df_matching_2$A_surveiller <- ifelse(prs_df_matching_2$matching_weight>2,"******"," ")
+
+## PSW
+form.ps <- "treated ~  MAILA__COST+ REF__VOLUME + LEAD__VOLUME + P_mater_fr +  P_2564_uni_above";
+
+tmp2 <- psw( data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0), ], form.ps = form.ps, weight = "MW",
+             mirror.hist = TRUE, add.weight = TRUE, family="binomial");
+
+```
+
+## Selection GLIDER
+
+```{r}
+### PS GLIDER 
+m_ps <- glm(formula = treated ~MAILA__COST+WEB__COST_W+P_POP_4564+p_const2011_2016+CRP3_SCORE_STD, family = "binomial", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% 
+                                                                                                     c(1, 0), ])
+
+summary(m_ps)
+
+boxplot(m_ps$fitted~data_var_statcan_Kmeans$treat[data_var_statcan_Kmeans$treated %in% 
+                                                    c(1,0)]);
+
+library(pROC)
+g <- roc(treated ~ predict(m_ps,type=c("response")), data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0), ])
+g
+prs_df_matching_2 <- data.frame(pr_score_2 = round(predict(m_ps, type = "response"),10),
+                                treated = m_ps$model$treated)
+
+prs_df_matching_2$matching_weight <- ifelse(prs_df_matching_2$treated == 1,1/prs_df_matching_2$pr_score_2,1/(1-prs_df_matching_2$pr_score_2))
+
+prs_df_matching_2$GEO_RTA <- data_var_statcan_Kmeans$GEO_RTA[data_var_statcan_Kmeans$treated %in% c(1,0)] 
+prs_df_matching_2$A_surveiller <- ifelse(prs_df_matching_2$matching_weight>2,"***"," ")
+
+## PSW
+form.ps <- "treated ~  MAILA__COST+WEB__COST_W+P_POP_4564+p_const2011_2016+CRP3_SCORE_STD";
+
+tmp2 <- psw( data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0), ], form.ps = form.ps, weight = "MW",
+             mirror.hist = TRUE, add.weight = TRUE, family="binomial");
+
+
+
+```
+
+## Le score de propension
+
+```{r}
+prs_df_matching_2
+```
+
+## Graphique des grands poids
+
+```{r}
+pca_PHONE_coord_1 <- merge(prs_df_matching_2,pca_PHONE_coord[pca_PHONE_coord$GEO_RTA %in% prs_df_matching_2$GEO_RTA,],by="GEO_RTA")
+plot_ly(
+  data  = pca_PHONE_coord_1, 
+  x     = ~ Dim.1, 
+  y     = ~ Dim.2,
+  color = ~ matching_weight , 
+  text = pca_PHONE_coord_1$GEO_RTA,
+  colors = c("red","blue"),
+  type= 'scatter',
+  mode='markers'
+)
+```
+
+
+# Récapitulatif des modèles {.tabset}
+
+```{r}
+data <- data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),]
+data <- cbind(data,prs_df_matching_2)
+```
+
+## GLM {.tabset}
+
+### Variable Phone continue
+
+```{r}
+data_var_statcan_Kmeans$X <- NULL
+formule_soum <- paste("SOUM_MEANS ~ ", 
+                         paste(colnames(data_var_statcan_Kmeans[,-c(1:3,13:14,55:61)]), collapse = ' + ')) %>% 
+  as.formula()
+
+## Selection backwards
+
+model.full <- glm(formula = SOUM_MEANS ~ MAILA__COST + WEB__COST_W + COMPETITOR__TELE_GRP_AUTO + 
+    PHONE__COST + P_POP_0024 + P_POP_4564 + P_POP_65o + P_separated + 
+    P_PO + P_5etaP + P_nooccupation + p_const2011_2016 + P_mater_ang + 
+    P_mater_fr + P_autoch + P_immigr + P_chom15P + P_2564_collcegep + 
+    median_hh_doll + cout_dwel_LO + cout_dwel_PO + median_dwel_doll + 
+    BURC + MOTC + CRP3_SCORE_STD, family = "gaussian", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% 
+    c(1, 0), ])
+
+summary(model.full)
+#model.full <- glm(formule_soum, family = "gaussian", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% 
+#    c(1, 0), ])
+#backwards <-  step(model.full)
+#summary(backwards)
+
+
+## Selection Matching weights
+
+model.full <- glm(formula = SOUM_MEANS ~ MAILA__COST + WEB__COST_W + PHONE__COST+
+    REF__VOLUME + COMPETITOR__TELE_GRP_AUTO + P_nooccupation + 
+    p_const2011_2016 + P_mater_ang + P_mater_fr + P_autoch + 
+    P_immigr + P_2564_nodiplo + P_2564_collcegep + P_2564_uni_below + 
+    P_2564_uni_above + cout_dwel_PO + median_dwel_doll + INCP_SCORE_AVG + 
+    INCP_SCORE_STD, family = "gaussian", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% 
+    c(1, 0), ])
+
+summary(model.full)
+```
+
+### Variable Phone Catégorielle
+
+```{r}
+#Catégorielle
+formule <- paste("SOUM_MEANS ~ ", 
+                 paste(colnames(data_var_statcan_Kmeans[,-c(1:3,12:14,55:56,58)]), collapse = ' + ')) %>% 
+  as.formula()
+
+#model.full <- glm(formula = formule, 
+#                  family = "gaussian", 
+#                  data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),])
+
+## Selection GLM
+model.full <- glm(formula = SOUM_MEANS ~ MAILA__COST + WEB__COST_W + REF__VOLUME +COMPETITOR__TELE_GRP_AUTO + P_POP_0024 + P_POP_4564 + P_commlaw +  P_condo + P_nooccupation + p_const2011_2016 + P_mater_ang + P_mater_fr + P_autoch + P_immigr + P_chom15P + P_2564_nodiplo +  P_2564_collcegep + P_2564_uni_below + P_2564_uni_above + cout_dwel_LO + cout_dwel_PO + CRP3_SCORE_STD + GROUP, family = "gaussian",data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in%  c(1, 0), ])
+  
+  
+summary(model.full)
+
+#backwards <-  step(model.full)
+#summary(backwards)
+
+
+## Selection Matching weights
+model.full <- glm(formula = SOUM_MEANS ~ MAILA__COST + WEB__COST_W + GROUP+
+    REF__VOLUME + COMPETITOR__TELE_GRP_AUTO + P_nooccupation + 
+    p_const2011_2016 + P_mater_ang + P_mater_fr + P_autoch + 
+    P_immigr + P_2564_nodiplo + P_2564_collcegep + P_2564_uni_below + 
+    P_2564_uni_above + cout_dwel_PO + median_dwel_doll + INCP_SCORE_AVG + 
+    INCP_SCORE_STD, family = "gaussian", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% 
+    c(1, 0), ])
+
+summary(model.full)
+```
+
+## Score de propension
+
+```{r}
+model <- glm(SOUM_MEANS ~ treated + logit(data$pr_score_2) ,
+                       data = data)
+summary(model)
+
+
+model <- glm(formula = SOUM_MEANS ~ treated + logit(data$pr_score_2) + 
+    MAILA__COST + REF__VOLUME + COMPETITOR__TELE_GRP_AUTO + P_POP_0024 + 
+    P_POP_65o + P_PO + P_nooccupation + p_const2011_2016 + P_mater_ang + 
+    P_mater_fr + P_autoch + P_immigr + P_chom15P + P_2564_nodiplo + 
+    P_2564_collcegep + P_2564_uni_below + median_hh_doll + cout_dwel_LO + 
+    cout_dwel_PO + median_dwel_doll, data = data)
+
+summary(model)
+```
+
+
+## Matching weights {.tabset}
+
+### Diagnostic de balance
+
+```{r}
+#Data
+test_data <- data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1, 0),]
+# Propensity score model
+form.ps <- "treated ~ MAILA__COST+WEB__COST_W+P_POP_4564+p_const2011_2016+CRP3_SCORE_STD";
+
+
+# A vector of covariates
+V.name <- colnames(data_var_statcan_Kmeans)[-c(1:3,12:14,55:58)];
+
+#1. Standardized differnce with "ATE"
+balance <- psw.balance(test_data, form.ps, weight = "ATE", V.name = V.name, K = 4)
+st.diff <- as.data.frame(balance$std.diff.after)
+st.diff$std.diff_2 <- 100*(st.diff[,1]-st.diff[,3])/st.diff[,1]
+st.diff[,c(1,3,5,6)]
+```
+
+Les variables pour lesquelles la différence 
+
+```{r}
+rownames(st.diff[abs(st.diff$std.diff.pct) < 10,])
+rownames(st.diff[abs(st.diff$std.diff_2) < 10,])
+
+```
+### Modèle 1
+
+```{r}
+model <- lm(SOUM_MEANS ~  treated   ,
+                       weights = data$matching_weight,data = data)
+summary(model)
+```
+
+
+### Modèle 2
+
+```{r}
+#Mêmes variables que GLM
+model <- glm(formula = SOUM_MEANS ~ treated + MAILA__COST + WEB__COST_W + COMPETITOR__TELE_GRP_AUTO + 
+   P_POP_0024 + P_POP_4564 + P_POP_65o + P_separated + 
+    P_PO + P_5etaP + P_nooccupation + p_const2011_2016 + P_mater_ang + 
+    P_mater_fr + P_autoch + P_immigr + P_chom15P + P_2564_collcegep + 
+    median_hh_doll + cout_dwel_LO + cout_dwel_PO + median_dwel_doll + 
+    BURC + MOTC + CRP3_SCORE_STD, data = data, 
+    weights = data$matching_weight)
+
+summary(model)
+```
+
+
+### Modèle 3
+
+```{r}
+model <- glm(formula = SOUM_MEANS ~ treated + MAILA__COST + WEB__COST_W + 
+    COMPETITOR__TELE_GRP_AUTO + P_POP_0024 + P_POP_4564 + P_POP_65o + 
+    P_separated + P_PO + P_5etaP + P_nooccupation + p_const2011_2016 + 
+    P_mater_ang + P_mater_fr + P_autoch + P_immigr + P_chom15P + 
+    P_2564_collcegep + median_hh_doll + cout_dwel_LO + cout_dwel_PO + 
+    median_dwel_doll + BURC + MOTC + CRP3_SCORE_STD, data = data, 
+    weights = data$matching_weight)
+summary(model)
+```
+
+### Modèle 4
+
+```{r}
+#Selection de variable Backwards
+model <- glm(formula = SOUM_MEANS ~ treated  + 
+    REF__VOLUME + COMPETITOR__TELE_GRP_AUTO + P_nooccupation + 
+    p_const2011_2016 + P_mater_ang + P_mater_fr + P_autoch + 
+    P_immigr + P_2564_nodiplo + P_2564_collcegep + P_2564_uni_below + 
+    P_2564_uni_above + cout_dwel_PO + median_dwel_doll + INCP_SCORE_AVG + 
+    INCP_SCORE_STD, data = data, weights = data$matching_weight)
+step(model)
+summary(model)
+```
+
+## GAMs
+
+### GAM - Continu 
+
+```{r}
+
+#Mêmes variables que Matching Weights
+library(mgcv)
+
+mod.c <- gam(
+  data    = data, 
+  family  = "gaussian", 
+  formula = SOUM_MEANS ~ s(MAILA__COST) + WEB__COST_W + PHONE__COST+
+    REF__VOLUME + COMPETITOR__TELE_GRP_AUTO + P_nooccupation + 
+    p_const2011_2016 + P_mater_ang + P_mater_fr + P_autoch + 
+    P_immigr + P_2564_nodiplo + P_2564_collcegep + P_2564_uni_below + 
+    P_2564_uni_above + cout_dwel_PO + median_dwel_doll + INCP_SCORE_AVG + 
+    INCP_SCORE_STD
+)
+
+summary(mod.c)
+plot(mod.c)
+
+#Mêmes variables que GLM
+library(mgcv)
+
+mod.c <- gam(
+  data    = data, 
+  family  = "gaussian", 
+  formula = SOUM_MEANS ~ s(MAILA__COST) + WEB__COST_W + COMPETITOR__TELE_GRP_AUTO + 
+    PHONE__COST + P_POP_0024 + P_POP_4564 + P_POP_65o + P_separated + 
+    P_PO + P_5etaP + P_nooccupation + p_const2011_2016 + P_mater_ang + 
+    P_mater_fr + P_autoch + P_immigr + P_chom15P + P_2564_collcegep + 
+    median_hh_doll + cout_dwel_LO + cout_dwel_PO + median_dwel_doll + 
+    BURC + MOTC + CRP3_SCORE_STD
+)
+
+summary(mod.c)
+plot(mod.c)
+```
+
+### GAM - Catégorielle
+
+```{r}
+#Mêmes variables que Matching Weights
+library(mgcv)
+
+mod.c <- gam(
+  data    = data, 
+  family  = "gaussian", 
+  formula = SOUM_MEANS ~ s(MAILA__COST) + WEB__COST_W + GROUP+
+    REF__VOLUME + COMPETITOR__TELE_GRP_AUTO + P_nooccupation + 
+    p_const2011_2016 + P_mater_ang + P_mater_fr + P_autoch + 
+    P_immigr + P_2564_nodiplo + P_2564_collcegep + P_2564_uni_below + 
+    P_2564_uni_above + cout_dwel_PO + median_dwel_doll + INCP_SCORE_AVG + 
+    INCP_SCORE_STD
+)
+
+summary(mod.c)
+plot(mod.c)
+
+#Mêmes variables que GLM
+library(mgcv)
+
+mod.c <- gam(
+  data    = data, 
+  family  = "gaussian", 
+  formula = SOUM_MEANS ~ s(MAILA__COST) + WEB__COST_W + COMPETITOR__TELE_GRP_AUTO + 
+   GROUP + P_POP_0024 + P_POP_4564 + P_POP_65o + P_separated + 
+    P_PO + P_5etaP + P_nooccupation + p_const2011_2016 + P_mater_ang + 
+    P_mater_fr + P_autoch + P_immigr + P_chom15P + P_2564_collcegep + 
+    median_hh_doll + cout_dwel_LO + cout_dwel_PO + median_dwel_doll + 
+    BURC + MOTC + CRP3_SCORE_STD
+)
+
+summary(mod.c)
+plot(mod.c)
+```
+
+## MatchIt {.tabset}
+
+### Appariement
+
+```{r}
+library(MatchIt)
+#optimal
+ps = glm(treated ~ MAILA__COST+WEB__COST_W+P_POP_4564+p_const2011_2016+CRP3_SCORE_STD, data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1, 0), ],
+ family = binomial(link = "logit"));
+summary(ps);
+matchs = matchit(treated ~ ps$fitted, method = "nearest", data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1, 0), ], distance = "mahalanobis");
+summary(matchs);
+m.data = match.data(matchs);
+t.test(SOUM_MEANS ~ treated, data = m.data);
+```
+### Knn
+
+```{r}
+library(MatchIt)
+#optimal
+m.out <- matchit(treated ~MAILA__COST+WEB__COST_W+P_POP_4564+p_const2011_2016+CRP3_SCORE_STD, data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1, 0), ], method = "nearest")
+m.out
+summary(m.out)
+plot(m.out)
+plot(m.out,type="jitter")
+plot(m.out,type="hist")
+```
+
+### Optimal
+
+```{r}
+library(MatchIt)
+#optimal
+m.out <- matchit(treated ~MAILA__COST+WEB__COST_W+P_POP_4564+p_const2011_2016+CRP3_SCORE_STD, data = data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1, 0), ], method = "optimal")
+summary(m.out)
+plot(m.out)
+plot(m.out,type="jitter")
+plot(m.out,type="hist")
+```
+
+
+# Résumé
+
+## Différences de moyennes
+
+```{r, echo = F}
+#Différences - télémarketing
+data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),] %>%
+  group_by(treated) %>% 
+  summarise(n_rtas = n(),
+            mean_phone = mean(PHONE__COST),
+            std_error = sd(PHONE__COST) / sqrt(n_rtas))
+
+
+#Différences - soumissions
+data_var_statcan_Kmeans[data_var_statcan_Kmeans$treated %in% c(1,0),] %>%
+  group_by(treated) %>% 
+  summarise(n_rtas = n(),
+            mean_soum = mean(SOUM_MEANS),
+            std_error = sd(SOUM_MEANS) / sqrt(n_rtas))
+```
+
+## Modèle MW : treated
+
+| Modèle      |  Coefficient Phone/Treated     | Erreur-Standard |   P-Value |
+| :------------ | :------------ |:------------ |:------------ |
+|MW   |  0.25540 |  0.04150  | 1.66e-08 |
+
+## Variables/selection Backwards sur le GLM
+
+| Modèle      |  Coefficient Phone/Treated     | Erreur-Standard |   P-Value |
+| :------------ | :------------ |:------------ |:------------ |
+|GLM, continu   |    3.549e-02     |   1.089e-02 | 0.001691 |
+| GLM, binaire  |  -0.1261100    |   0.0413692 |0.003164 |
+| GAM, continu       | 3.559e-02      | 1.084e-02 |  0.001571 |
+|GAM, binaire       |   -1.043e-01  |   4.139e-02 | 0.013895 |
+|Matching Weights      |   9.726e-02   |    4.134e-02 | 0.021317 |
+
+
